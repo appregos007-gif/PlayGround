@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Chaos Janitor: Quantum Shift</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #05050a; }
+  body { display: flex; align-items: center; justify-content: center; font-family: "Courier New", Courier, monospace; }
+  #wrap { position: relative; width: 100vw; height: 100vh; max-width: 1280px; max-height: 720px; }
+  canvas { width: 100%; height: 100%; object-fit: contain; image-rendering: crisp-edges; display: block; background: #05050a; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game" width="1280" height="720"></canvas></div>
+<script>
+/* ==========================================================================
+   Chaos Janitor: Quantum Shift — single-file HTML5 Canvas arcade micro-game
+   ========================================================================== */
+const W = 1280, H = 720;
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d', { alpha: false });
+
+// ---------------------------------------------------------------- palette --
+const C = {
+  bg: '#06060d', panel: '#0f0f1a', line: '#1a1a2e',
+  cyan: '#00f0ff', mag: '#ff00ff', yel: '#ffe800', grn: '#0aff88', org: '#ff8800',
+  red: '#ff3333', wht: '#ffffff', dim: '#444466'
+};
+
+// ---------------------------------------------------------------- audio --
+const Audio = {
+  ctx: null, master: null,
+  started: false,
+  init() {
+    if (!this.ctx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      this.ctx = new AC();
+      this.master = this.ctx.createGain();
+      this.master.gain.value = 0.5;
+      this.master.connect(this.ctx.destination);
+    }
+    return this.ctx.resume();
+  },
+  _tone(freq, type, dur, vol, ramp) {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    const o = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(freq, t);
+    if (ramp) o.frequency.exponentialRampToValueAtTime(ramp, t + dur);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    o.connect(g); g.connect(this.master);
+    o.start(t); o.stop(t + dur + 0.05);
+  },
+  click()   { this._tone(440, 'square', 0.05, 0.08); },
+  ok()      { this._tone(660, 'square', 0.08, 0.1); this._tone(990, 'square', 0.08, 0.08, undefined); },
+  fail()    { this._tone(110, 'sawtooth', 0.15, 0.12, 80); },
+  focus()   { [440, 554, 659, 880].forEach((f, i) => this._tone(f, 'square', 0.12, 0.09, undefined)); },
+  roomDone(){ [523, 659, 784, 1047].forEach((f, i) => this._tone(f, 'square', 0.15, 0.1, undefined)); },
+  modifier(){ this._tone(300, 'square', 0.2, 0.12, 120); this._tone(900, 'square', 0.15, 0.08, undefined); },
+  taskFail(){ this._tone(150, 'sawtooth', 0.25, 0.15, 60); },
+  tick()    { if (Math.random() < 0.3) this._tone(800, 'square', 0.03, 0.03); },
+};
+
+// --------------------------------------------------------------- music --
+const Music = {
+  active: false, ctx: null,
+  nextNote: 0, interval: 0.5, bass: 110, bassNext: 0, bassInterval: 1.6,
+  scale: [220, 246.94, 261.63, 293.66, 329.63, 349.23, 392.0, 440.0, 493.88, 523.25],
+  idx: 0,
+  start() { this.active = true; this.ctx = Audio.ctx; },
+  stop() { this.active = false; },
+  setFocus(f) { this.interval = f ? 0.18 : 0.5; },
+  update(dt) {
+    if (!this.active || !this.ctx) return;
+    const t = this.ctx.currentTime;
+    while (this.nextNote <= t) {
+      const f = this.scale[(this.idx++) % this.scale.length];
+      this._pluck(f, 0.04);
+      this.nextNote += this.interval;
+    }
+    while (this.bassNext <= t) {
+      this._pluck(this.bass, 0.25, 0.05);
+      this.bassNext += this.bassInterval;
+    }
+  },
+  _pluck(freq, dur, vol = 0.035) {
+    const t = this.ctx.currentTime;
+    const o = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    o.type = 'square';
+    o.frequency.setValueAtTime(freq, t);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    o.connect(g); g.connect(Audio.master);
+    o.start(t); o.stop(t + dur + 0.05);
+  }
+};
+
+// -------------------------------------------------------------- particles --
+class Particle {
+  constructor(x, y, color) {
+    this.x = x; this.y = y;
+    const a = Math.random() * Math.PI * 2;
+    const s = 1.5 + Math.random() * 4;
+    this.vx = Math.cos(a) * s; this.vy = Math.sin(a) * s;
+    this.life = 1.0; this.maxLife = 0.35 + Math.random() * 0.5;
+    this.color = color; this.size = 2 + Math.random() * 4;
+  }
+  update(dt) {
+    this.x += this.vx * 60 * dt; this.y += this.vy * 60 * dt;
+    this.vx *= 0.92; this.vy *= 0.92;
+    this.life -= dt / this.maxLife;
+  }
+  draw(c) {
+    c.globalAlpha = this.life;
+    c.fillStyle = this.color;
+    c.beginPath(); c.arc(this.x, this.y, this.size * this.life, 0, Math.PI * 2); c.fill();
+    c.globalAlpha = 1.0;
+  }
+}
+const Particles = {
+  arr: [],
+  emit(x, y, color, n = 6) {
+    for (let i = 0; i < n; i++) this.arr.push(new Particle(x, y, color));
+  },
+  update(dt) {
+    for (let i = this.arr.length - 1; i >= 0; i--) {
+      this.arr[i].update(dt);
+      if (this.arr[i].life <= 0) this.arr.splice(i, 1);
+    }
+  },
+  draw(c) { this.arr.forEach(p => p.draw(c)); }
+};
+
+// --------------------------------------------------------------- input --
+const Input = { x: 0, y: 0, down: false, justDown: false, justUp: false, px: 0, py: 0 };
+function pointerToCanvas(e) {
+  const r = canvas.getBoundingClientRect();
+  const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+  const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+  const sx = W / r.width, sy = H / r.height;
+  Input.x = (clientX - r.left) * sx;
+  Input.y = (clientY - r.top) * sy;
+}
+['mousedown','mousemove','mouseup','touchstart','touchmove','touchend'].forEach(ev => {
+  canvas.addEventListener(ev, e => {
+    if (ev.startsWith('touch')) e.preventDefault();
+    pointerToCanvas(e);
+    if (ev === 'mousedown' || ev === 'touchstart') { Input.down = true; Input.justDown = true; }
+    if (ev === 'mouseup' || ev === 'touchend') { Input.down = false; Input.justUp = true; }
+  });
+});
+window.addEventListener('blur', () => { Input.down = false; Input.justDown = false; Input.justUp = false; });
+
+// -------------------------------------------------------------- helpers --
+function rect(c, x, y, w, h, color, glow = false) {
+  c.fillStyle = color;
+  c.shadowBlur = glow ? 14 : 0; c.shadowColor = color;
+  c.fillRect(x - w/2, y - h/2, w, h);
+  c.shadowBlur = 0;
+}
+function line(c, x1, y1, x2, y2, color, width = 3, glow = false) {
+  c.beginPath(); c.moveTo(x1, y1); c.lineTo(x2, y2);
+  c.strokeStyle = color; c.lineWidth = width; c.lineCap = 'round';
+  c.shadowBlur = glow ? 10 : 0; c.shadowColor = color;
+  c.stroke(); c.shadowBlur = 0;
+}
+function circle(c, x, y, r, color, fill = true, glow = false) {
+  c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2);
+  if (fill) { c.fillStyle = color; c.shadowBlur = glow ? 12 : 0; c.shadowColor = color; c.fill(); }
+  else { c.strokeStyle = color; c.lineWidth = 2; c.shadowBlur = glow ? 12 : 0; c.shadowColor = color; c.stroke(); }
+  c.shadowBlur = 0;
+}
+function text(c, str, x, y, size, color, center = true, glow = false) {
+  c.font = `bold ${size}px "Courier New", Courier, monospace`;
+  c.fillStyle = color; c.textBaseline = 'middle';
+  c.textAlign = center ? 'center' : 'left';
+  c.shadowBlur = glow ? 10 : 0; c.shadowColor = color;
+  c.fillText(str, x, y);
+  c.shadowBlur = 0;
+}
+
+// -------------------------------------------------------------- tasks --
+const TASKS = ['SLIME', 'PIPES', 'GRAV', 'VAC'];
+
+class Task {
+  constructor(type, roomW, roomH) {
+    this.type = type; this.complete = false; this.fail = false;
+    this.timer = 15; // seconds to complete
+    this.roomW = roomW; this.roomH = roomH;
+  }
+  update(dt) { this.timer -= dt; if (this.timer <= 0) this.fail = true; }
+  draw(c) {} // implemented by subclasses
+  press(x, y) { return { ok: false, done: false }; } // {action ok?, task complete?}
+}
+
+// --- SLIME: contain glowing alien blobs -----------------------------------
+class TaskSlime extends Task {
+  constructor(roomW, roomH) {
+    super('SLIME', roomW, roomH);
+    this.blobs = [];
+    const n = 5;
+    for (let i = 0; i < n; i++) {
+      this.blobs.push({
+        x: 120 + Math.random() * (roomW - 240),
+        y: 120 + Math.random() * (roomH - 240),
+        r: 24 + Math.random() * 16,
+        vx: (Math.random() - 0.5) * 20,
+        vy: (Math.random() - 0.5) * 20,
+        contained: false
+      });
+    }
+  }
+  update(dt) {
+    super.update(dt);
+    this.blobs.forEach(b => {
+      if (b.contained) return;
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      if (b.x - b.r < 20) { b.x = 20 + b.r; b.vx *= -1; }
+      if (b.x + b.r > this.roomW - 20) { b.x = this.roomW - 20 - b.r; b.vx *= -1; }
+      if (b.y - b.r < 20) { b.y = 20 + b.r; b.vy *= -1; }
+      if (b.y + b.r > this.roomH - 20) { b.y = this.roomH - 20 - b.r; b.vy *= -1; }
+    });
+  }
+  draw(c, ox, oy, focus) {
+    c.save(); c.translate(ox, oy);
+    text(c, 'CONTAIN THE SLIME', this.roomW / 2, 26, 18, C.cyan, true);
+    // containment tank
+    const tx = this.roomW - 90, ty = this.roomH / 2;
+    const done = this.blobs.filter(b => b.contained).length;
+    line(c, tx, ty - 110, tx, ty + 110, C.cyan, 3);
+    line(c, tx - 50, ty + 110, tx + 50, ty + 110, C.cyan, 3);
+    line(c, tx - 50, ty - 110, tx + 50, ty - 110, C.cyan, 3);
+    const fill = (done / this.blobs.length) * 200;
+    c.fillStyle = C.cyan; c.globalAlpha = 0.35;
+    c.fillRect(tx - 46, ty + 106 - fill, 92, fill);
+    c.globalAlpha = 1;
+    text(c, `${done}/${this.blobs.length}`, tx, ty - 140, 16, C.cyan, true);
+    this.blobs.forEach(b => {
+      if (b.contained) return;
+      const g = focus ? C.yel : C.grn;
+      circle(c, b.x, b.y, b.r, g, true, true);
+      // bubble core
+      c.fillStyle = '#e0fffc'; c.beginPath(); c.arc(b.x - b.r*0.35, b.y - b.r*0.35, b.r*0.22, 0, Math.PI*2); c.fill();
+    });
+    c.restore();
+  }
+  press(x, y, ox, oy) {
+    for (const b of this.blobs) {
+      if (b.contained) continue;
+      const dx = x - (ox + b.x), dy = y - (oy + b.y);
+      if (dx*dx + dy*dy < b.r*b.r) {
+        b.contained = true;
+        Particles.emit(ox + b.x, oy + b.y, C.grn, 8);
+        Audio.ok();
+        if (this.blobs.every(b => b.contained)) { this.complete = true; Audio.roomDone(); }
+        return { ok: true, done: this.complete };
+      }
+    }
+    return { ok: false, done: false };
+  }
+}
+
+// --- PIPES: snap matching connectors --------------------------------------
+class TaskPipes extends Task {
+  constructor(roomW, roomH) {
+    super('PIPES', roomW, roomH);
+    this.colors = [C.cyan, C.mag, C.yel, C.grn, C.org];
+    this.pairs = [];
+    const n = 4;
+    const used = [];
+    for (let i = 0; i < n; i++) {
+      let col;
+      do { col = this.colors[Math.floor(Math.random() * this.colors.length)]; } while (used.includes(col));
+      used.push(col);
+      this.pairs.push({ color: col, left: { x: 90, y: 140 + i * 95, done: false }, right: { x: roomW - 90, y: 140 + i * 95, done: false }, connected: false });
+    }
+    this.shuffleRight();
+    this.selected = null;
+  }
+  shuffleRight() {
+    const ys = this.pairs.map(p => p.right.y).sort(() => Math.random() - 0.5);
+    this.pairs.forEach((p, i) => { p.right.y = ys[i]; });
+  }
+  draw(c, ox, oy, focus) {
+    c.save(); c.translate(ox, oy);
+    text(c, 'SNAP PIPE CONNECTORS', this.roomW / 2, 26, 18, C.cyan, true);
+    text(c, 'tap a color on each side to match', this.roomW / 2, 54, 14, C.dim, true);
+    this.pairs.forEach(p => {
+      const gl = focus;
+      circle(c, p.left.x, p.left.y, 16, p.color, true, gl);
+      circle(c, p.right.x, p.right.y, 16, p.color, true, gl);
+      if (p.connected) line(c, p.left.x, p.left.y, p.right.x, p.right.y, p.color, 5, true);
+    });
+    if (this.selected) {
+      circle(c, this.selected.x, this.selected.y, 22, C.wht, false, true);
+    }
+    c.restore();
+  }
+  press(x, y, ox, oy) {
+    const side = x < ox + this.roomW / 2 ? 'left' : 'right';
+    let hit = null;
+    for (const p of this.pairs) {
+      if (p.connected) continue;
+      const pt = side === 'left' ? p.left : p.right;
+      const dx = x - (ox + pt.x), dy = y - (oy + pt.y);
+      if (dx*dx + dy*dy < 22*22) { hit = { p, pt, side }; break; }
+    }
+    if (!hit) return { ok: false, done: false };
+    const { p } = hit;
+    if (side === 'left') {
+      this.selected = { x: p.left.x, y: p.left.y, color: p.color };
+      Audio.click();
+      return { ok: true, done: false };
+    } else {
+      if (!this.selected) { Audio.click(); return { ok: true, done: false }; }
+      if (this.selected.color === p.color) {
+        p.connected = true; this.selected = null;
+        Particles.emit(ox + p.left.x, oy + p.left.y, p.color, 6);
+        Particles.emit(ox + p.right.x, oy + p.right.y, p.color, 6);
+        Audio.ok();
+        if (this.pairs.every(p => p.connected)) { this.complete = true; Audio.roomDone(); }
+        return { ok: true, done: this.complete };
+      } else {
+        this.selected = null;
+        Particles.emit(ox + p.right.x, oy + p.right.y, C.red, 6);
+        Audio.fail();
+        return { ok: false, done: false };
+      }
+    }
+  }
+}
+
+// --- GRAV: balance gravity indicators -------------------------------------
+class TaskGrav extends Task {
+  constructor(roomW, roomH) {
+    super('GRAV', roomW, roomH);
+    this.left = { v: 30, target: 40 + Math.random() * 20, zone: 0 }; // zone set below
+    this.right = { v: 70, target: 60 + Math.random() * 20 };
+    this.left.zone = this.left.target;
+    this.right.zone = this.right.target;
+    this.inZoneTime = 0;
+    this.levers = [
+      { x: 150, y: this.roomH - 90, dl: -10, dr: 6,  label: 'A' },
+      { x: 300, y: this.roomH - 90, dl: 6,  dr: -10, label: 'B' },
+      { x: 460, y: this.roomH - 90, dl: -6, dr: 10, label: 'C' },
+      { x: 620, y: this.roomH - 90, dl: 10, dr: -6, label: 'D' },
+    ];
+  }
+  update(dt) {
+    super.update(dt);
+    const lOk = Math.abs(this.left.v - this.left.zone) < 8;
+    const rOk = Math.abs(this.right.v - this.right.zone) < 8;
+    if (lOk && rOk) { this.inZoneTime += dt; if (this.inZoneTime >= 0.7) this.complete = true; }
+    else this.inZoneTime = 0;
+  }
+  draw(c, ox, oy, focus) {
+    c.save(); c.translate(ox, oy);
+    text(c, 'BALANCE GRAVITY INDICATORS', this.roomW / 2, 26, 18, C.cyan, true);
+    const drawInd = (x, v, zone, col) => {
+      const yy = this.roomH / 2;
+      line(c, x, yy - 130, x, yy + 130, C.line, 4);
+      // zone
+      c.fillStyle = col; c.globalAlpha = 0.18;
+      c.fillRect(x - 26, yy - (zone * 1.3) - 14, 52, 28);
+      c.globalAlpha = 1;
+      c.strokeStyle = col; c.lineWidth = 3; c.shadowBlur = 10; c.shadowColor = col;
+      c.strokeRect(x - 26, yy - (zone * 1.3) - 14, 52, 28);
+      c.shadowBlur = 0;
+      // needle
+      const ny = yy - v * 1.3;
+      c.fillStyle = C.wht; c.shadowBlur = 12; c.shadowColor = C.wht;
+      c.fillRect(x - 10, ny - 4, 20, 8);
+      c.shadowBlur = 0;
+      text(c, Math.round(v) + '%', x, yy - 150, 14, C.wht, true);
+    };
+    drawInd(180, this.left.v, this.left.zone, C.org);
+    drawInd(this.roomW - 180, this.right.v, this.right.zone, C.mag);
+    text(c, 'hold both needles in the zone', this.roomW / 2, this.roomH - 150, 13, C.dim, true);
+    this.levers.forEach(l => {
+      const on = Math.abs(this.left.v - this.left.zone) < 8 && Math.abs(this.right.v - this.right.zone) < 8;
+      rect(c, l.x, l.y, 100, 40, l.done ? C.grn : (on ? C.grn : C.panel), true);
+      c.strokeStyle = C.wht; c.lineWidth = 2; c.strokeRect(l.x - 50, l.y - 20, 100, 40);
+      text(c, l.label, l.x, l.y, 16, C.wht, true);
+    });
+    c.restore();
+  }
+  press(x, y, ox, oy) {
+    for (const l of this.levers) {
+      const dx = x - (ox + l.x), dy = y - (oy + l.y);
+      if (dx*dx + dy*dy < 60*60) {
+        this.left.v = Math.max(0, Math.min(100, this.left.v + l.dl));
+        this.right.v = Math.max(0, Math.min(100, this.right.v + l.dr));
+        l.done = true;
+        Audio.click();
+        Particles.emit(ox + l.x, oy + l.y, C.wht, 4);
+        if (this.complete) Audio.roomDone();
+        return { ok: true, done: this.complete };
+      }
+    }
+    return { ok: false, done: false };
+  }
+}
+
+// --- VAC: vacuum floating debris ------------------------------------------
+class TaskVac extends Task {
+  constructor(roomW, roomH) {
+    super('VAC', roomW, roomH);
+    this.debris = [];
+    const n = 8;
+    for (let i = 0; i < n; i++) {
+      this.debris.push({
+        x: 80 + Math.random() * (roomW - 160),
+        y: 80 + Math.random() * (roomH - 160),
+        vx: (Math.random() - 0.5) * 40,
+        vy: (Math.random() - 0.5) * 40,
+        r: 5 + Math.random() * 4
+      });
+    }
+    this.suck = false;
+  }
+  update(dt) {
+    super.update(dt);
+    this.debris.forEach(d => {
+      d.x += d.vx * dt; d.y += d.vy * dt;
+      if (d.x - d.r < 20) { d.x = 20 + d.r; d.vx *= -1; }
+      if (d.x + d.r > this.roomW - 20) { d.x = this.roomW - 20 - d.r; d.vx *= -1; }
+      if (d.y - d.r < 20) { d.y = 20 + d.r; d.vy *= -1; }
+      if (d.y + d.r > this.roomH - 20) { d.y = this.roomH - 20 - d.r; d.vy *= -1; }
+    });
+  }
+  draw(c, ox, oy, focus) {
+    c.save(); c.translate(ox, oy);
+    text(c, 'VACUUM FLOATING DEBRIS', this.roomW / 2, 26, 18, C.cyan, true);
+    this.debris.forEach(d => {
+      c.fillStyle = C.wht; c.shadowBlur = 8; c.shadowColor = C.wht;
+      c.fillRect(d.x - d.r, d.y - d.r, d.r * 2, d.r * 2);
+      c.shadowBlur = 0;
+    });
+    // nozzle at cursor passed via external; draw handled by game layer
+    c.restore();
+  }
+  drawNozzle(c, ox, oy, x, y) {
+    const nx = x - ox, ny = y - oy;
+    line(c, nx, ny, nx, ny + 40, C.cyan, 4, true);
+    circle(c, nx, ny, 14, C.cyan, false, true);
+    // suction beam to nearest debris
+    let near = null, best = 1e9;
+    this.debris.forEach(d => {
+      const dd = (d.x - nx)*(d.x - nx) + (d.y - ny)*(d.y - ny);
+      if (dd < best) { best = dd; near = d; }
+    });
+    if (near && best < 90*90) {
+      line(c, nx, ny, near.x, near.y, C.cyan, 2, true);
+    }
+  }
+  press(x, y, ox, oy) {
+    const nx = x - ox, ny = y - oy;
+    let removed = 0;
+    for (let i = this.debris.length - 1; i >= 0; i--) {
+      const d = this.debris[i];
+      const dx = d.x - nx, dy = d.y - ny;
+      if (dx*dx + dy*dy < (36 + d.r)*(36 + d.r)) {
+        this.debris.splice(i, 1);
+        removed++;
+        Particles.emit(ox + d.x, oy + d.y, C.wht, 4);
+      }
+    }
+    if (removed > 0) { Audio.ok(); if (this.debris.length === 0) { this.complete = true; Audio.roomDone(); } return { ok: true, done: this.complete }; }
+    Audio.click();
+    return { ok: false, done: false };
+  }
+}
+
+// ---------------------------------------------------------------- game --
+const ROOM_W = 760, ROOM_H = 520;
+const ROOM_X = (W - ROOM_W) / 2, ROOM_Y = 110;
+
+function createTask(type) {
+  switch (type) {
+    case 'SLIME': return new TaskSlime(ROOM_W, ROOM_H);
+    case 'PIPES': return new TaskPipes(ROOM_W, ROOM_H);
+    case 'GRAV':  return new TaskGrav(ROOM_W, ROOM_H);
+    case 'VAC':   return new TaskVac(ROOM_W, ROOM_H);
+  }
+}
+
+const MODIFIERS = [
+  { id: 'zeroG',  name: 'ZERO-G DRIFT',  color: C.mag, desc: 'Controls drift' },
+  { id: 'inv',    name: 'INVERTED',      color: C.org, desc: 'Controls flipped' },
+  { id: 'slip',   name: 'SLIPPERY',      color: C.yel, desc: 'Cursor slides' },
+  { id: 'dark',   name: 'BLACKOUT',      color: C.red, desc: 'Background dims' },
+  { id: 'fast',   name: 'OVERTIME',      color: C.cyan, desc: 'Room timer faster' },
+];
+
+class Game {
+  constructor() {
+    this.state = 'TITLE'; // TITLE, PLAYING, RESULT
+    this.shiftTime = 60;
+    this.roomTime = 20;
+    this.score = 0;
+    this.integrity = 3;
+    this.streak = 0;
+    this.room = null;
+    this.cursor = { x: W/2, y: H/2, tx: W/2, ty: H/2 };
+    this.focus = false; this.focusTime = 0;
+    this.modifier = null; this.modTime = 0;
+    this.nextModAt = 20;
+    this.flash = 0;
+    this.btnRetry = null;
+    this.btnBegin = null;
+  }
+  startShift() {
+    this.state = 'PLAYING';
+    this.shiftTime = 60; this.roomTime = 20; this.score = 0; this.integrity = 3;
+    this.streak = 0; this.focus = false; this.focusTime = 0;
+    this.modifier = null; this.modTime = 0; this.nextModAt = 60 - 40; // first at 20s elapsed
+    this.nextModAt = 20;
+    this.newRoom();
+    Audio.init().then(() => { Music.start(); });
+  }
+  newRoom() {
+    this.room = [];
+    const picked = [];
+    for (let i = 0; i < 3; i++) picked.push(TASKS[Math.floor(Math.random() * TASKS.length)]);
+    picked.forEach(t => this.room.push(createTask(t)));
+    this.roomTime = 20;
+  }
+  endShift() {
+    this.state = 'RESULT';
+    Music.stop();
+  }
+  triggerFocus() {
+    this.focus = true; this.focusTime = 7;
+    Music.setFocus(true);
+    Audio.focus();
+    Particles.emit(W/2, H/2, C.cyan, 20);
+    this.flash = 0.3;
+  }
+  actionOk() {
+    this.streak++;
+    this.score += 50;
+    if (this.streak >= 5) { this.triggerFocus(); this.streak = 0; }
+  }
+  actionBad() {
+    this.streak = 0;
+    Audio.fail();
+    Particles.emit(Input.x, Input.y, C.red, 6);
+    this.flash = 0.15;
+  }
+  update(dt) {
+    if (this.state === 'TITLE') {
+      this.cursor.tx = Input.x; this.cursor.ty = Input.y;
+      this.cursor.x += (this.cursor.tx - this.cursor.x) * 0.15;
+      this.cursor.y += (this.cursor.ty - this.cursor.y) * 0.15;
+      if (Input.justDown) Audio.click();
+      return;
+    }
+    if (this.state === 'RESULT') {
+      this.cursor.tx = Input.x; this.cursor.ty = Input.y;
+      this.cursor.x += (this.cursor.tx - this.cursor.x) * 0.15;
+      this.cursor.y += (this.cursor.ty - this.cursor.y) * 0.15;
+      if (Input.justDown) {
+        if (this.btnRetry && Input.x >= this.btnRetry.x - 130 && Input.x <= this.btnRetry.x + 130 &&
+            Input.y >= this.btnRetry.y - 30 && Input.y <= this.btnRetry.y + 30) {
+          Audio.init().then(() => { Music.start(); this.startShift(); });
+        }
+      }
+      return;
+    }
+    // PLAYING
+    const timeScale = this.focus ? 0.7 : (this.modifier && this.modifier.id === 'fast' ? 1.3 : 1);
+    if (this.modifier && this.modifier.id === 'zeroG') {
+      this.cursor.tx += (Math.random() - 0.5) * 14;
+      this.cursor.ty += (Math.random() - 0.5) * 14;
+    } else if (this.modifier && this.modifier.id === 'inv') {
+      this.cursor.tx = W - Input.x;
+      this.cursor.ty = H - Input.y;
+    } else if (this.modifier && this.modifier.id === 'slip') {
+      this.cursor.tx += (Input.x - this.cursor.tx) * 0.3;
+      this.cursor.ty += (Input.y - this.cursor.ty) * 0.3;
+    } else {
+      this.cursor.tx = Input.x; this.cursor.ty = Input.y;
+    }
+    this.cursor.x += (this.cursor.tx - this.cursor.x) * 0.22;
+    this.cursor.y += (this.cursor.ty - this.cursor.y) * 0.22;
+
+    this.shiftTime -= dt * timeScale;
+    if (this.shiftTime <= 0) { this.shiftTime = 0; this.endShift(); return; }
+
+    // modifiers every 20s of shift (use elapsed = 60 - shiftTime)
+    const elapsed = 60 - this.shiftTime;
+    if (!this.modifier && elapsed >= this.nextModAt) {
+      this.applyModifier();
+      this.nextModAt += 20;
+    }
+    if (this.modifier) {
+      this.modTime -= dt * timeScale;
+      if (this.modTime <= 0) { this.modifier = null; this.modTime = 0; }
+    }
+
+    // focus zone countdown
+    if (this.focus) {
+      this.focusTime -= dt * timeScale;
+      if (this.focusTime <= 0) { this.focus = false; this.focusTime = 0; Music.setFocus(false); }
+    }
+
+    // room timer
+    this.roomTime -= dt * (this.modifier && this.modifier.id === 'fast' ? 1.5 : 1);
+    if (this.roomTime <= 0) {
+      this.integrity--;
+      Audio.taskFail();
+      Particles.emit(W/2, H/2, C.red, 15);
+      this.flash = 0.3;
+      this.streak = 0;
+      if (this.integrity <= 0) { this.endShift(); return; }
+      this.newRoom();
+    }
+
+    // update tasks
+    const active = this.room[0];
+    active.update(dt);
+    if (active.complete) {
+      this.room.shift();
+      if (this.room.length === 0) this.newRoom();
+    } else if (active.fail) {
+      this.integrity--;
+      Audio.taskFail();
+      Particles.emit(W/2, H/2, C.red, 15);
+      this.flash = 0.2;
+      this.streak = 0;
+      if (this.integrity <= 0) { this.endShift(); return; }
+      this.room.shift();
+      if (this.room.length === 0) this.newRoom();
+    }
+    Music.update(dt);
+    Particles.update(dt);
+  }
+  applyModifier() {
+    const m = MODIFIERS[Math.floor(Math.random() * MODIFIERS.length)];
+    this.modifier = m; this.modTime = 10;
+    Audio.modifier();
+    this.flash = 0.25;
+  }
+  handlePress() {
+    if (this.state !== 'PLAYING') return;
+    const active = this.room[0];
+    if (!active) return;
+    const res = active.press(Input.x, Input.y, ROOM_X, ROOM_Y);
+    if (res.ok) {
+      this.actionOk();
+      if (res.done) this.score += 200;
+      Particles.emit(Input.x, Input.y, C.cyan, 6);
+    } else {
+      this.actionBad();
+    }
+  }
+  draw() {
+    const c = ctx;
+    c.fillStyle = C.bg; c.fillRect(0, 0, W, H);
+
+    // scanlines / grid
+    c.strokeStyle = 'rgba(255,255,255,0.03)'; c.lineWidth = 1;
+    for (let i = 0; i < H; i += 22) { c.beginPath(); c.moveTo(0, i); c.lineTo(W, i); c.stroke(); }
+    c.strokeStyle = 'rgba(0,240,255,0.04)';
+    for (let i = 0; i < W; i += 110) { c.beginPath(); c.moveTo(i, 0); c.lineTo(i, H); c.stroke(); }
+
+    const dimOverlay = this.focus || (this.modifier && this.modifier.id === 'dark');
+    if (dimOverlay) {
+      c.fillStyle = 'rgba(0,0,0,0.45)'; c.fillRect(0, 0, W, H);
+    }
+
+    if (this.state === 'TITLE') {
+      this.drawTitle(c);
+    } else if (this.state === 'RESULT') {
+      this.drawResult(c);
+    } else {
+      this.drawHUD(c);
+      this.drawRoom(c);
+      this.drawFocusBanner(c);
+      this.drawModBanner(c);
+    }
+    Particles.draw(c);
+    this.drawCursor(c);
+    if (this.flash > 0) {
+      c.fillStyle = `rgba(255,255,255,${this.flash})`; c.fillRect(0,0,W,H); this.flash -= dtGlobal * 1.5;
+      if (this.flash < 0) this.flash = 0;
+    }
+  }
+  drawTitle(c) {
+    text(c, 'CHAOS JANITOR', W/2, H/2 - 90, 56, C.cyan, true, true);
+    text(c, 'QUANTUM SHIFT', W/2, H/2 - 40, 30, C.mag, true, true);
+    text(c, '60-SECOND STATION SHIFTS', W/2, H/2 + 10, 16, C.dim, true);
+    this.btnBegin = { x: W/2, y: H/2 + 80, w: 340, h: 64 };
+    const hover = Math.abs(Input.x - this.btnBegin.x) < this.btnBegin.w/2 && Math.abs(Input.y - this.btnBegin.y) < this.btnBegin.h/2;
+    rect(c, this.btnBegin.x, this.btnBegin.y, this.btnBegin.w, this.btnBegin.h, hover ? C.wht : C.panel, true);
+    c.strokeStyle = hover ? C.cyan : C.cyan; c.lineWidth = 3; c.strokeRect(this.btnBegin.x - this.btnBegin.w/2, this.btnBegin.y - this.btnBegin.h/2, this.btnBegin.w, this.btnBegin.h);
+    text(c, 'BEGIN SHIFT', this.btnBegin.x, this.btnBegin.y, 26, hover ? C.bg : C.cyan, true);
+    text(c, 'tap anywhere to start', W/2, H/2 + 170, 14, C.dim, true);
+  }
+  drawResult(c) {
+    text(c, 'SHIFT COMPLETE', W/2, H/2 - 110, 40, C.cyan, true, true);
+    text(c, `SCORE: ${this.score}`, W/2, H/2 - 40, 44, C.yel, true, true);
+    text(c, `INTEGRITY LEFT: ${this.integrity}/3`, W/2, H/2 + 10, 18, C.grn, true);
+    this.btnRetry = { x: W/2, y: H/2 + 80, w: 340, h: 64 };
+    const hover = Math.abs(Input.x - this.btnRetry.x) < this.btnRetry.w/2 && Math.abs(Input.y - this.btnRetry.y) < this.btnRetry.h/2;
+    rect(c, this.btnRetry.x, this.btnRetry.y, this.btnRetry.w, this.btnRetry.h, hover ? C.wht : C.panel, true);
+    c.strokeStyle = hover ? C.cyan : C.cyan; c.lineWidth = 3; c.strokeRect(this.btnRetry.x - this.btnRetry.w/2, this.btnRetry.y - this.btnRetry.h/2, this.btnRetry.w, this.btnRetry.h);
+    text(c, 'RETRY SHIFT', this.btnRetry.x, this.btnRetry.y, 26, hover ? C.bg : C.cyan, true);
+  }
+  drawHUD(c) {
+    // shift timer
+    const tCol = this.shiftTime < 10 ? C.red : C.cyan;
+    text(c, `SHIFT ${Math.ceil(this.shiftTime)}`, 90, 40, 30, tCol, true, true);
+    text(c, `SCORE ${this.score}`, W/2, 40, 24, C.yel, true);
+    // integrity
+    text(c, `HULL`, W - 150, 40, 18, C.dim, false);
+    for (let i = 0; i < 3; i++) {
+      rect(c, W - 110 + i * 30, 40, 22, 22, i < this.integrity ? C.grn : C.line, true);
+    }
+    // streak
+    text(c, `STREAK ${this.streak}/5`, W/2, 78, 18, this.streak >= 4 ? C.org : C.wht, true);
+    // room timer
+    text(c, `ROOM ${Math.ceil(this.roomTime)}s`, W/2, 106, 16, C.mag, true);
+  }
+  drawRoom(c) {
+    c.save();
+    c.translate(ROOM_X, ROOM_Y);
+    // room border
+    c.strokeStyle = C.line; c.lineWidth = 3; c.strokeRect(0, 0, ROOM_W, ROOM_H);
+    c.strokeStyle = C.cyan; c.lineWidth = 1;
+    c.strokeRect(4, 4, ROOM_W - 8, ROOM_H - 8);
+    this.room.forEach((t, i) => {
+      if (i === 0) t.draw(c, 0, 0, this.focus);
+      else {
+        // ghost upcoming tasks
+        c.globalAlpha = 0.35;
+        text(c, t.type, ROOM_W/2, 60 + i * 34, 14, C.dim, true);
+        c.globalAlpha = 1;
+      }
+    });
+    if (this.room[0] && this.room[0].type === 'VAC') {
+      this.room[0].drawNozzle(c, 0, 0, this.cursor.x - ROOM_X, this.cursor.y - ROOM_Y);
+    }
+    c.restore();
+    // room label box
+    c.fillStyle = 'rgba(0,0,0,0.6)'; c.fillRect(ROOM_X + 10, ROOM_Y + ROOM_H - 34, 200, 26);
+    text(c, `TASK: ${this.room[0].type}`, ROOM_X + 110, ROOM_Y + ROOM_H - 21, 16, C.cyan, true);
+  }
+  drawFocusBanner(c) {
+    if (!this.focus) return;
+    c.fillStyle = 'rgba(0,240,255,0.15)'; c.fillRect(0, 0, W, 40);
+    c.strokeStyle = C.cyan; c.lineWidth = 2; c.strokeRect(0, 0, W, 40);
+    text(c, '>> FOCUS ZONE ACTIVE <<  time dilated  ||  neon outlines  ||  tempo up', W/2, 20, 18, C.cyan, true, true);
+  }
+  drawModBanner(c) {
+    if (!this.modifier) return;
+    const m = this.modifier;
+    c.fillStyle = 'rgba(0,0,0,0.5)'; c.fillRect(0, H - 56, W, 56);
+    c.strokeStyle = m.color; c.lineWidth = 2; c.strokeRect(0, H - 56, W, 56);
+    text(c, `MODIFIER: ${m.name}`, W/2, H - 38, 20, m.color, true, true);
+    text(c, `${m.desc}  •  ${Math.ceil(this.modTime)}s`, W/2, H - 16, 15, C.wht, true);
+  }
+  drawCursor(c) {
+    c.save();
+    c.translate(this.cursor.x, this.cursor.y);
+    c.strokeStyle = C.cyan; c.lineWidth = 3; c.shadowBlur = 10; c.shadowColor = C.cyan;
+    c.beginPath(); c.moveTo(0, -14); c.lineTo(0, -6); c.moveTo(-14, 0); c.lineTo(-6, 0); c.moveTo(0, 14); c.lineTo(0, 6); c.moveTo(14, 0); c.lineTo(6, 0); c.stroke();
+    c.shadowBlur = 0;
+    c.beginPath(); c.arc(0, 0, 5, 0, Math.PI*2); c.fillStyle = C.wht; c.fill();
+    c.restore();
+  }
+}
+
+// --------------------------------------------------------------- loop --
+const game = new Game();
+let dtGlobal = 0;
+let last = performance.now();
+function loop(now) {
+  dtGlobal = (now - last) / 1000; last = now;
+  if (dtGlobal > 0.1) dtGlobal = 0.1;
+  Audio.init(); // ensure context resumed on interaction
+  game.update(dtGlobal);
+  game.draw();
+  requestAnimationFrame(loop);
+}
+// paint one frame immediately so the canvas has content at load time
+game.draw();
+
+// start input-initiated
+canvas.addEventListener('pointerdown', () => Audio.init(), { once: true });
+canvas.addEventListener('touchstart', () => Audio.init(), { once: true });
+canvas.addEventListener('mousedown', () => {
+  if (game.state === 'TITLE') {
+    const b = game.btnBegin;
+    if (b && Math.abs(Input.x - b.x) < b.w/2 && Math.abs(Input.y - b.y) < b.h/2) {
+      Audio.init().then(() => { Music.start(); game.startShift(); });
+    }
+  }
+  game.handlePress();
+});
+canvas.addEventListener('touchstart', () => {
+  if (game.state === 'TITLE') {
+    const b = game.btnBegin;
+    if (b && Math.abs(Input.x - b.x) < b.w/2 && Math.abs(Input.y - b.y) < b.h/2) {
+      Audio.init().then(() => { Music.start(); game.startShift(); });
+    }
+  }
+  game.handlePress();
+});
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
